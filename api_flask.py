@@ -892,5 +892,112 @@ def download_all_files():
         mimetype='application/zip'
     )
 
+@app.route('/api/reflection', methods=['POST'])
+def reflection():
+    # 存储评估结果
+    assessment_results = []
+    
+    # 获取所有 .pdbqt 文件
+    pdbqt_files = []
+    for filename in os.listdir(DOWNLOAD_FOLDER):
+        if filename.endswith('.pdbqt'):
+            pdbqt_files.append(filename)
+    
+    # 查找 posebusters_results.csv 文件
+    posebusters_file = DOWNLOAD_FOLDER / "posebusters_results.csv"
+    
+    # 如果构象评估结果文件不存在，返回错误
+    if not posebusters_file.exists():
+        return jsonify({"error": "构象评估结果文件不存在"}), 404
+    
+    # 读取构象评估结果，创建文件名到结果的映射
+    posebusters_results = {}
+    try:
+        with open(posebusters_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+            for i in range(1, len(lines)):  # 跳过表头
+                line_parts = lines[i].strip().split(",")
+                if len(line_parts) > 1:
+                    # 获取结果对应的文件名（最后一列）
+                    filename = line_parts[-1]
+                    base_filename = os.path.splitext(filename)[0]
+                    
+                    # 检查所有位置（除最后一列外）是否都为 True
+                    posebusters_pass = all(part.strip() == "True" for part in line_parts[:-1])
+                    posebusters_results[base_filename] = posebusters_pass
+    except Exception as e:
+        return jsonify({"error": f"读取构象评估结果失败: {str(e)}"}), 500
+    
+    # 分析每个 pdbqt 文件的对接结合能
+    for pdbqt_file in pdbqt_files:
+        pdbqt_path = DOWNLOAD_FOLDER / pdbqt_file
+        base_filename = os.path.splitext(pdbqt_file)[0]
+        processed_filename = f"{base_filename}_processed"
+        
+        # 读取对接结合能
+        try:
+            binding_energy = None
+            with open(pdbqt_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                
+                if pdbqt_file.endswith("vina.pdbqt"):
+                    # Vina 格式：在第二行 "REMARK VINA RESULT:" 后的第一个数字
+                    if len(lines) > 1:
+                        vina_line = lines[1].strip()
+                        if "REMARK VINA RESULT:" in vina_line:
+                            energy_part = vina_line.split("REMARK VINA RESULT:")[1].strip().split()[0]
+                            binding_energy = float(energy_part)
+                else:
+                    # 其他格式：在第三行 "Estimated Free Energy of Binding    = " 后的数字
+                    if len(lines) > 2:
+                        energy_line = lines[2].strip()
+                        if "Estimated Free Energy of Binding    =" in energy_line:
+                            energy_part = energy_line.split("=")[1].strip().split()[0]
+                            # 去掉可能的 + 号
+                            if energy_part.startswith('+'):
+                                energy_part = energy_part[1:]
+                            binding_energy = float(energy_part)
+            
+            # 检查结合能是否小于 -5
+            if binding_energy is not None:
+                binding_energy_pass = binding_energy < -5
+                
+                # 检查构象评估结果
+                posebusters_pass = False
+                # 寻找对应的 processed 文件名
+                for pb_filename in posebusters_results:
+                    if pb_filename == processed_filename or pb_filename == base_filename:
+                        posebusters_pass = posebusters_results[pb_filename]
+                        break
+                
+                # 两个指标都通过才算通过
+                overall_pass = binding_energy_pass and posebusters_pass
+                
+                assessment_results.append({
+                    "filename": pdbqt_file,
+                    "binding_energy": binding_energy,
+                    "binding_energy_pass": binding_energy_pass,
+                    "posebusters_pass": posebusters_pass,
+                    "overall_pass": "YES" if overall_pass else "NO"
+                })
+                
+        except Exception as e:
+            assessment_results.append({
+                "filename": pdbqt_file,
+                "error": f"分析失败: {str(e)}",
+                "overall_result": "NO"
+            })
+    
+    # 如果没有评估结果，返回错误
+    if not assessment_results:
+        return jsonify({"error": "未找到可评估的文件"}), 404
+    
+    # 返回评估结果
+    return jsonify({
+        "message": "reflection completed",
+        "results": assessment_results
+    })
+
+
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=True)
